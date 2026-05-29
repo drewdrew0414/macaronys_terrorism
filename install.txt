@@ -1,0 +1,1 @@
+pip install streamlit pdfplumber python-dotenv psutil ollama torch transformers accelerate torchvision torchaudio torch-directml intel-extension-for-pytorch
