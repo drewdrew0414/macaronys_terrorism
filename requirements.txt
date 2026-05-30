@@ -4,3 +4,14 @@ python-dotenv
 psutil
 ollama
 torch
+pymupdf
+faster-whisper
+trafilatura
+beautifulsoup4
+weasyprint
+audio-recorder-streamlit
+youtube-transcript-api
+langdetect
+pytest
+pytest-cov
+pytest-mock
