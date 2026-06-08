@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import discord
@@ -125,7 +125,7 @@ from macaronys_backend.services.team_project_service import (
     list_user_reviews,
     submit_peer_review,
 )
-from macaronys_backend.utils.time import app_tz, ensure_aware, new_id, remaining_text
+from macaronys_backend.utils.time import app_tz, ensure_aware, new_id, remaining_text, utc_now
 
 logger = logging.getLogger("macaronys.discord")
 PLACEHOLDER_VALUES = {"", "CHANNEL_ID_HERE", "GUILD_ID_HERE", "ROLE_ID_HERE"}
@@ -1394,6 +1394,79 @@ async def _before_vote_close() -> None:
     await bot.wait_until_ready()
 
 
+@tasks.loop(minutes=5)
+async def _recruitment_expiry_task() -> None:
+    """모집 마감(3일)이 지난 팀원모집을 만료 처리하고 팀장에게 DM으로 알린다."""
+    try:
+        now = utc_now()
+        expired: list[dict] = []
+        async with SessionLocal() as session:
+            rows = await session.execute(
+                select(TeamProject)
+                .where(TeamProject.is_deleted.is_(False))
+                .where(TeamProject.status == TeamProjectStatus.recruiting.value)
+                .where(TeamProject.recruit_deadline.is_not(None))
+                .where(TeamProject.recruit_deadline <= now)
+            )
+            for proj in rows.scalars().all():
+                proj.status = TeamProjectStatus.cancelled.value
+                link_row = await session.execute(
+                    select(DiscordUserLink)
+                    .where(DiscordUserLink.user_id == proj.maker_id)
+                    .limit(1)
+                )
+                link = link_row.scalar_one_or_none()
+                expired.append(
+                    {
+                        "id": proj.id,
+                        "title": proj.title,
+                        "message_id": proj.recruitment_message_id,
+                        "maker_discord_id": link.discord_user_id if link else None,
+                    }
+                )
+            if expired:
+                await session.commit()
+
+        if not expired:
+            return
+
+        recruit_cid = configured_recruitment_channel_id()
+        for item in expired:
+            # 1) 팀장에게 만료 DM
+            maker_id = item["maker_discord_id"]
+            if maker_id:
+                try:
+                    maker = bot.get_user(int(maker_id)) or await bot.fetch_user(int(maker_id))
+                    await maker.send(
+                        f"⏰ 팀 **{item['title']}** 의 팀원 모집이 3일이 지나 **만료**되었습니다. "
+                        f"계속 모집하려면 `/팀원모집`으로 새로 열어 주세요."
+                    )
+                except Exception:
+                    logger.warning("모집 만료 DM 실패: %s", item["id"])
+
+            # 2) 모집 메시지 버튼 비활성화 + 만료 표시
+            if recruit_cid and item["message_id"]:
+                try:
+                    ch = bot.get_channel(int(recruit_cid)) or await bot.fetch_channel(int(recruit_cid))
+                    if isinstance(ch, discord.TextChannel):
+                        msg = await ch.fetch_message(int(item["message_id"]))
+                        embed = msg.embeds[0] if msg.embeds else discord.Embed(title="팀원 모집")
+                        embed.title = f"⛔ 모집 만료: {item['title']}"
+                        embed.color = 0x99AAB5
+                        await msg.edit(embed=embed, view=None)
+                except Exception:
+                    logger.warning("모집 메시지 만료 처리 실패: %s", item["id"])
+
+        logger.info("팀원모집 만료 처리: %d건", len(expired))
+    except Exception:
+        logger.exception("팀원모집 만료 처리 실패")
+
+
+@_recruitment_expiry_task.before_loop
+async def _before_recruitment_expiry() -> None:
+    await bot.wait_until_ready()
+
+
 # ─── AI 과제 추출 (순차 처리 큐) ──────────────────────────────────────────────
 #
 # Discord에서 들어온 공지/파일을 로컬 Ollama Gemma로 추출한다.
@@ -1818,6 +1891,7 @@ class MacaronysDiscordBot(commands.Bot):
 
         _notification_dispatch_task.start()
         _vote_close_task.start()
+        _recruitment_expiry_task.start()
         ai_scan_queue.start()
 
 
@@ -2569,6 +2643,9 @@ async def create_team_recruitment(
         text_ch = await guild.create_text_channel(f"{제목[:20]}-채팅", category=cat_team, overwrites=team_overwrites)
         voice_ch = await guild.create_voice_channel(f"{제목[:20]}-음성", category=cat_team, overwrites=team_overwrites)
 
+        # 모집 마감(3일 유효)
+        recruit_deadline = utc_now() + timedelta(days=3)
+
         # DB에 채널 정보 저장
         async with SessionLocal() as session:
             from macaronys_backend.models import TeamProject
@@ -2578,9 +2655,11 @@ async def create_team_recruitment(
                 proj_obj.voice_channel_id = str(voice_ch.id)
                 proj_obj.team_role_id = str(team_role.id)
                 proj_obj.team_category_id = str(cat_team.id)
+                proj_obj.recruit_deadline = recruit_deadline
                 await session.commit()
 
         # 팀원모집 채널에 포스팅
+        deadline_local = recruit_deadline.astimezone(app_tz())
         recruit_embed = discord.Embed(
             title=f"🏃 팀원 모집: {제목}",
             description=설명,
@@ -2590,7 +2669,12 @@ async def create_team_recruitment(
         recruit_embed.add_field(name="팀장", value=interaction.user.mention, inline=True)
         recruit_embed.add_field(name="최대 인원", value=f"{최대인원}명", inline=True)
         recruit_embed.add_field(name="팀 채널", value=text_ch.mention, inline=True)
-        recruit_embed.set_footer(text=f"팀 ID: {project.id[:8]}")
+        recruit_embed.add_field(
+            name="모집 마감",
+            value=f"{deadline_local.strftime('%Y-%m-%d %H:%M')} (3일 후)",
+            inline=False,
+        )
+        recruit_embed.set_footer(text=f"팀 ID: {project.id[:8]} · 모집 기간 3일")
 
         recruit_cid = configured_recruitment_channel_id()
         if recruit_cid:
