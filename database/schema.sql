@@ -237,11 +237,24 @@ CREATE TABLE IF NOT EXISTS command_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS notices (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+    guild_id TEXT NOT NULL,
+    scope VARCHAR(40) NOT NULL,
+    title VARCHAR(255),
+    content TEXT NOT NULL,
+    author_discord_user_id TEXT NOT NULL,
+    author_name VARCHAR(120),
+    sent_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_clubs_guild_id ON clubs(guild_id);
 CREATE INDEX IF NOT EXISTS idx_club_members_club_id ON club_members(club_id);
 CREATE INDEX IF NOT EXISTS idx_voice_rooms_channel_id ON voice_rooms(channel_id);
 CREATE INDEX IF NOT EXISTS idx_command_logs_created_at ON command_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_command_logs_actor ON command_logs(actor_discord_user_id);
+CREATE INDEX IF NOT EXISTS idx_notices_guild_created ON notices(guild_id, created_at DESC);
 
 DROP TRIGGER IF EXISTS trg_clubs_updated_at ON clubs;
 CREATE TRIGGER trg_clubs_updated_at
