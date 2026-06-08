@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -14,7 +15,14 @@ from sqlalchemy import or_, select
 
 from macaronys_backend.config import settings
 from macaronys_backend.database import SessionLocal, close_db, init_db
-from macaronys_backend.enums import AssignmentStatus, ClubMemberRole, CommandLogStatus, TeamProjectStatus
+from macaronys_backend.enums import (
+    AssignmentStatus,
+    CandidateStatus,
+    ClubMemberRole,
+    CommandLogStatus,
+    SourceType,
+    TeamProjectStatus,
+)
 from macaronys_backend.models import TeamJoinRequest
 from macaronys_backend.models import (
     Assignment,
@@ -30,8 +38,21 @@ from macaronys_backend.schemas.team_project import (
     TeamProjectCreate,
 )
 from macaronys_backend.services.assignment_service import (
+    accept_candidate,
     create_assignment,
     list_assignments,
+)
+from macaronys_backend.schemas.ai import LocalAiJobResult
+from macaronys_backend.services.ai_job_service import submit_ai_job_result
+from macaronys_backend.services.document_parser import (
+    detect_source_type,
+    extract_text_from_file,
+)
+from macaronys_backend.services.file_storage import safe_filename
+from macaronys_backend.services.ollama_client import OllamaGemmaClient
+from macaronys_backend.services.source_service import (
+    create_source_and_ai_job,
+    list_candidates,
 )
 from macaronys_backend.models import Registration, Vote, VoteChoice, VoteResponse
 from macaronys_backend.services.discord_management_service import (
@@ -62,10 +83,12 @@ from macaronys_backend.services.discord_management_service import (
     get_vote_choices,
     get_vote_results,
     list_clubs,
+    list_recent_notices,
     record_vote,
     reject_join_request,
     reject_registration,
     save_command_log,
+    save_notice,
     transfer_club_admin,
     update_config_channels,
     update_config_console_channel,
@@ -73,6 +96,7 @@ from macaronys_backend.services.discord_management_service import (
 )
 from macaronys_backend.services.discord_service import (
     get_channel_class_id,
+    get_linked_user,
     link_discord_user,
     require_linked_user,
     resolve_context_class_id,
@@ -100,7 +124,7 @@ from macaronys_backend.services.team_project_service import (
     list_user_reviews,
     submit_peer_review,
 )
-from macaronys_backend.utils.time import ensure_aware, remaining_text
+from macaronys_backend.utils.time import app_tz, ensure_aware, new_id, remaining_text
 
 logger = logging.getLogger("macaronys.discord")
 PLACEHOLDER_VALUES = {"", "CHANNEL_ID_HERE", "GUILD_ID_HERE", "ROLE_ID_HERE"}
@@ -125,8 +149,8 @@ RECRUITMENT_CHANNEL_NAME = "팀원모집"
 
 # 학생이 쓸 수 있는 명령어 (이외는 선생님/관리자만)
 STUDENT_ALLOWED_COMMANDS = {
-    "가입", "과제목록", "팀원모집", "팀목록", "팀참여", "팀완료",
-    "팀평가", "팀평가요약", "음성방생성", "반명단",
+    "가입", "과제목록", "과제스캔", "공지목록", "팀원모집", "팀목록", "팀참여", "팀완료",
+    "팀평가", "팀평가보기", "음성방생성", "반명단",
     "급식", "시간표",
     # 동아리 명령어 - 내부에서 권한 체크
     "동아리멤버추가", "동아리관리자양도", "동아리관리자추가", "동아리삭제", "동아리목록",
@@ -1331,6 +1355,346 @@ async def _before_vote_close() -> None:
     await bot.wait_until_ready()
 
 
+# ─── AI 과제 추출 (순차 처리 큐) ──────────────────────────────────────────────
+#
+# Discord에서 들어온 공지/파일을 로컬 Ollama Gemma로 추출한다.
+# 모델은 한 번에 하나만 돌리는 게 안정적이라, 단일 워커가 FIFO로 "순서대로"
+# 처리한다. 요청이 몰리면 그냥 대기열에 쌓이고 차례가 오면 처리된다.
+
+SCAN_MAX_CHARS = 24000          # 프롬프트에 넣을 본문 상한
+SCAN_SUPPORTED_HINT = "PDF 또는 TXT 파일, 혹은 공지 텍스트를 보내주세요."
+
+
+class _ScanTask:
+    """추출 큐에 들어가는 단위 작업."""
+
+    def __init__(
+        self,
+        *,
+        job_id: str,
+        source_id: str,
+        prompt: str,
+        title: str,
+        requester_id: int,
+        guild_id: str | None,
+        channel: discord.abc.Messageable,
+    ) -> None:
+        self.job_id = job_id
+        self.source_id = source_id
+        self.prompt = prompt
+        self.title = title
+        self.requester_id = requester_id
+        self.guild_id = guild_id
+        self.channel = channel
+
+
+class AiScanQueue:
+    """단일 워커로 AI 추출 작업을 순차 처리하는 인-프로세스 큐."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[_ScanTask] = asyncio.Queue()
+        self._worker: asyncio.Task[None] | None = None
+        self._client = OllamaGemmaClient(settings)
+        self._processing = False
+
+    def start(self) -> None:
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._run(), name="discord-ai-scan-worker")
+            logger.info("AI 스캔 큐 워커 시작")
+
+    async def submit(self, task: _ScanTask) -> int:
+        """작업을 큐에 넣고, 이 작업 앞에 처리 대기 중인 건수를 돌려준다."""
+        ahead = self._queue.qsize() + (1 if self._processing else 0)
+        await self._queue.put(task)
+        return ahead
+
+    async def _run(self) -> None:
+        while True:
+            task = await self._queue.get()
+            self._processing = True
+            try:
+                await self._process(task)
+            except Exception:
+                logger.exception("AI 스캔 처리 실패: job=%s", task.job_id)
+                try:
+                    await task.channel.send(
+                        embed=discord.Embed(
+                            title="⚠️ AI 추출 중 오류",
+                            description="처리 중 문제가 발생했어요. 잠시 후 다시 시도해 주세요.",
+                            color=0xED4245,
+                        )
+                    )
+                except Exception:
+                    pass
+            finally:
+                self._processing = False
+                self._queue.task_done()
+
+    async def _process(self, task: _ScanTask) -> None:
+        # 1) 모델 호출 → 결과를 기존 파이프라인(submit_ai_job_result)으로 저장
+        async with SessionLocal() as session:
+            try:
+                result_text = await self._client.generate(task.prompt)
+            except Exception as exc:
+                await submit_ai_job_result(
+                    session,
+                    task.job_id,
+                    LocalAiJobResult(success=False, error_message=str(exc)),
+                )
+                await task.channel.send(
+                    embed=discord.Embed(
+                        title="⚠️ AI 추출 실패",
+                        description=f"모델 호출에 실패했어요.\n`{str(exc)[:500]}`",
+                        color=0xED4245,
+                    )
+                )
+                return
+            await submit_ai_job_result(
+                session,
+                task.job_id,
+                LocalAiJobResult(success=True, result_text=result_text),
+            )
+
+        # 2) 저장된 후보를 불러와 사용자에게 결과 전송
+        async with SessionLocal() as session:
+            candidates = await list_candidates(session, task.source_id)
+        await send_scan_results(task, candidates)
+
+
+ai_scan_queue = AiScanQueue()
+
+
+def _write_scan_temp(data: bytes, filename: str) -> Path:
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / f"{new_id()}-{safe_filename(filename)}"
+    path.write_bytes(data)
+    return path
+
+
+async def build_scan_text(
+    content: str | None,
+    attachments: list[discord.Attachment],
+) -> tuple[str, str]:
+    """텍스트와 첨부(PDF/TXT)에서 추출 대상 본문과 제목을 만든다."""
+    parts: list[str] = []
+    title: str | None = None
+
+    if content and content.strip():
+        parts.append(content.strip())
+
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    for att in attachments:
+        filename = att.filename or "file"
+        if att.size and att.size > max_bytes:
+            parts.append(f"[{filename}: 파일이 너무 커서 건너뜀]")
+            continue
+        try:
+            source_type = detect_source_type(filename, att.content_type)
+        except HTTPException:
+            continue  # 지원하지 않는 형식은 무시
+        try:
+            data = await att.read()
+            path = _write_scan_temp(data, filename)
+            text = await asyncio.to_thread(extract_text_from_file, path, source_type)
+        except Exception:
+            logger.exception("첨부 파싱 실패: %s", filename)
+            continue
+        if text.strip():
+            parts.append(f"[{filename}]\n{text.strip()}")
+            if title is None:
+                title = filename
+
+    raw = "\n\n".join(parts).strip()
+    if len(raw) > SCAN_MAX_CHARS:
+        raw = raw[:SCAN_MAX_CHARS]
+
+    if title is None:
+        snippet = (content or "").strip().splitlines()[0] if content and content.strip() else "chat"
+        title = (snippet[:40] or "chat")
+    return raw, title
+
+
+async def enqueue_scan(
+    *,
+    raw_text: str,
+    title: str,
+    requester_id: int,
+    guild_id: str | None,
+    channel: discord.abc.Messageable,
+) -> int:
+    """자료/AI잡을 만들고(외부 워커가 못 가져가게 잠금) 순차 큐에 넣는다."""
+    async with SessionLocal() as session:
+        source, job = await create_source_and_ai_job(
+            session,
+            source_type=SourceType.discord,
+            title=title[:255],
+            raw_text=raw_text,
+            claimed_by="discord-scan",
+        )
+    task = _ScanTask(
+        job_id=job.id,
+        source_id=source.id,
+        prompt=job.prompt,
+        title=title,
+        requester_id=requester_id,
+        guild_id=guild_id,
+        channel=channel,
+    )
+    return await ai_scan_queue.submit(task)
+
+
+def _format_candidate_field(candidate) -> tuple[str, str]:
+    name = f"📌 {candidate.title[:230]}"
+    lines: list[str] = []
+    if candidate.subject:
+        lines.append(f"과목: {candidate.subject}")
+    if candidate.due_at:
+        local = ensure_aware(candidate.due_at).astimezone(app_tz())
+        _, remain = remaining_text(candidate.due_at)
+        lines.append(f"마감: {local.strftime('%Y-%m-%d %H:%M')} ({remain})")
+    else:
+        lines.append("마감: 미상 — 등록하려면 /과제추가로 직접 입력하세요")
+    if candidate.submit_method:
+        lines.append(f"제출: {candidate.submit_method}")
+    lines.append(f"신뢰도: {candidate.confidence * 100:.0f}%")
+    return name, "\n".join(lines)
+
+
+async def send_scan_results(task: _ScanTask, candidates: list) -> None:
+    pending = [c for c in candidates if c.status == CandidateStatus.pending.value]
+    mention = f"<@{task.requester_id}>" if task.guild_id else None
+
+    if not pending:
+        embed = discord.Embed(
+            title="🔍 추출 결과 없음",
+            description="이 내용에서는 과제·수행평가를 찾지 못했어요.",
+            color=0x99AAB5,
+        )
+        await task.channel.send(content=mention, embed=embed)
+        return
+
+    embed = discord.Embed(
+        title=f"🧠 AI 과제 추출 결과 — {len(pending)}건",
+        description=f"자료: {task.title[:80]}",
+        color=0x57F287,
+        timestamp=datetime.now(timezone.utc),
+    )
+    for candidate in pending[:10]:
+        name, value = _format_candidate_field(candidate)
+        embed.add_field(name=name, value=value, inline=False)
+    if len(pending) > 10:
+        embed.set_footer(text=f"외 {len(pending) - 10}건 더 있음 · 확인 후 아래 버튼으로 등록하세요")
+    else:
+        embed.set_footer(text="확인 후 아래 버튼으로 등록하세요")
+
+    registerable = any(c.due_at is not None for c in pending)
+    view = (
+        ScanResultView(task.source_id, task.requester_id, task.guild_id)
+        if registerable
+        else None
+    )
+    await task.channel.send(content=mention, embed=embed, view=view)
+
+
+async def register_scanned_candidates(
+    source_id: str,
+    requester_discord_id: str,
+    guild_id: str | None,
+) -> tuple[list[Assignment], int]:
+    """마감일이 있는 추출 후보를 과제로 확정하고 알림을 예약한다."""
+    async with SessionLocal() as session:
+        candidates = await list_candidates(session, source_id)
+        pending = [c for c in candidates if c.status == CandidateStatus.pending.value]
+        registerable = [c for c in pending if c.due_at is not None]
+        skipped = len(pending) - len(registerable)
+        if not registerable:
+            return [], skipped
+
+        # 등록자(연동 사용자)와 반 컨텍스트 해석
+        user = None
+        if guild_id:
+            user = await get_linked_user(session, guild_id, requester_discord_id)
+        if user is None:
+            row = await session.execute(
+                select(DiscordUserLink)
+                .where(DiscordUserLink.discord_user_id == requester_discord_id)
+                .limit(1)
+            )
+            link = row.scalar_one_or_none()
+            if link is not None:
+                user = await session.get(User, link.user_id)
+        class_id = user.class_id if user else None
+
+        created: list[Assignment] = []
+        for candidate in registerable:
+            assignment = await accept_candidate(session, candidate.id)
+            if class_id or user is not None:
+                assignment.class_id = class_id
+                assignment.creator_id = user.id if user else None
+                await session.commit()
+                await session.refresh(assignment)
+            await rebuild_notifications_for_assignment(session, assignment)
+            await session.commit()
+            created.append(assignment)
+    return created, skipped
+
+
+class ScanResultView(discord.ui.View):
+    """추출 결과를 과제로 등록하는 버튼. (요청자 본인 또는 선생님/관리자만)"""
+
+    def __init__(self, source_id: str, requester_id: int, guild_id: str | None) -> None:
+        super().__init__(timeout=600)
+        self._source_id = source_id
+        self._requester_id = requester_id
+        self._guild_id = guild_id
+
+    @discord.ui.button(label="✅ 과제로 등록", style=discord.ButtonStyle.success)
+    async def register(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.user.id != self._requester_id and not is_teacher_or_admin(interaction):
+            await interaction.followup.send(
+                "등록은 요청자 본인 또는 선생님/관리자만 할 수 있어요.", ephemeral=True
+            )
+            return
+        try:
+            created, skipped = await register_scanned_candidates(
+                self._source_id, str(interaction.user.id), self._guild_id
+            )
+        except Exception as exc:
+            await interaction.followup.send(f"등록 실패: {exc}", ephemeral=True)
+            return
+
+        if not created:
+            await interaction.followup.send(
+                "등록할 과제가 없어요. (이미 등록됐거나, 마감일이 있는 후보가 없습니다.)",
+                ephemeral=True,
+            )
+            return
+
+        for item in self.children:
+            item.disabled = True  # type: ignore[attr-defined]
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+        lines = "\n".join(f"- `{a.id[:8]}` {a.title}" for a in created)
+        note = (
+            f"\n\n⚠️ 마감일이 없어 제외된 {skipped}건은 /과제추가로 직접 등록하세요."
+            if skipped
+            else ""
+        )
+        await interaction.followup.send(
+            f"✅ {len(created)}개 과제를 등록하고 알림을 예약했어요.\n{lines}{note}",
+            ephemeral=True,
+        )
+
+
 class MacaronysDiscordBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
@@ -1368,9 +1732,50 @@ class MacaronysDiscordBot(commands.Bot):
 
         _notification_dispatch_task.start()
         _vote_close_task.start()
+        ai_scan_queue.start()
 
 
 bot = MacaronysDiscordBot()
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    """개인 DM으로 공지/파일을 보내면 AI 과제 추출을 실행한다."""
+    if message.author.bot:
+        return
+
+    # 개인 채팅(DM)에서만 자동 추출. 서버 채널은 /과제스캔 명령을 쓴다.
+    if message.guild is None and isinstance(message.channel, discord.DMChannel):
+        content = message.content or ""
+        attachments = list(message.attachments)
+        if not content.strip() and not attachments:
+            return
+        try:
+            raw_text, title = await build_scan_text(content, attachments)
+            if not raw_text:
+                await message.channel.send(
+                    f"추출할 내용을 찾지 못했어요. {SCAN_SUPPORTED_HINT}"
+                )
+                return
+            ahead = await enqueue_scan(
+                raw_text=raw_text,
+                title=title,
+                requester_id=message.author.id,
+                guild_id=None,
+                channel=message.channel,
+            )
+            if ahead > 0:
+                await message.channel.send(
+                    f"🧠 추출 대기열에 추가했어요. 앞에 **{ahead}건**이 있어 순서대로 처리해요. 끝나면 알려드릴게요."
+                )
+            else:
+                await message.channel.send("🧠 AI가 과제를 추출하는 중이에요... 잠시만요!")
+        except Exception:
+            logger.exception("DM 스캔 처리 실패")
+            await message.channel.send("처리 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.")
+        return
+
+    await bot.process_commands(message)
 
 
 _KO_ERRORS: dict[type, str] = {
@@ -1855,6 +2260,51 @@ async def show_assignments(interaction: discord.Interaction) -> None:
         await send_error(interaction, exc)
 
 
+@bot.tree.command(
+    name="과제스캔",
+    description="공지 텍스트나 PDF/TXT에서 과제·수행평가를 AI로 추출합니다. (개인 DM에서도 사용 가능)",
+)
+@app_commands.describe(
+    내용="공지 텍스트 (선택)",
+    파일="PDF 또는 TXT 파일 (선택)",
+)
+async def scan_assignments(
+    interaction: discord.Interaction,
+    내용: str | None = None,
+    파일: discord.Attachment | None = None,
+) -> None:
+    await interaction.response.defer(ephemeral=True)
+    try:
+        attachments = [파일] if 파일 is not None else []
+        raw_text, title = await build_scan_text(내용, attachments)
+        if not raw_text:
+            await interaction.followup.send(
+                f"스캔할 내용이 없어요. {SCAN_SUPPORTED_HINT}", ephemeral=True
+            )
+            return
+
+        guild_id = str(interaction.guild_id) if interaction.guild_id else None
+        ahead = await enqueue_scan(
+            raw_text=raw_text,
+            title=title,
+            requester_id=interaction.user.id,
+            guild_id=guild_id,
+            channel=interaction.channel,
+        )
+        if ahead > 0:
+            await interaction.followup.send(
+                f"🧠 추출 대기열에 추가했어요. 앞에 **{ahead}건**이 있어 순서대로 처리합니다. 완료되면 이 채널에 결과를 보낼게요.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "🧠 AI가 과제를 추출하는 중이에요... 완료되면 이 채널에 결과를 보낼게요.",
+                ephemeral=True,
+            )
+    except Exception as exc:
+        await send_error(interaction, exc)
+
+
 @bot.tree.command(name="팀원모집", description="팀을 만들고 팀채팅·팀음성 채널을 생성합니다.")
 @app_commands.describe(
     제목="팀 이름/모집 제목",
@@ -2105,7 +2555,7 @@ async def review_teammate_project_autocomplete(
     )
 
 
-@bot.tree.command(name="평가보기", description="특정 팀원의 익명 평가 결과를 봅니다.")
+@bot.tree.command(name="팀평가보기", description="특정 팀원의 익명 평가 결과를 봅니다.")
 @app_commands.describe(대상="평가를 조회할 팀원")
 async def view_reviews(
     interaction: discord.Interaction,
@@ -2148,9 +2598,9 @@ async def view_reviews(
         await send_error(interaction, exc)
 
 
-# ─── 방생성 ───────────────────────────────────────────────────────────────────
+# ─── 학급채널생성 ─────────────────────────────────────────────────────────────
 
-@bot.tree.command(name="방생성", description="학급 채널·역할·로그채널 전체를 자동으로 생성하고 config를 갱신합니다.")
+@bot.tree.command(name="학급채널생성", description="학급 채널·역할·로그채널 전체를 자동으로 생성하고 config를 갱신합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def create_rooms(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
@@ -2177,7 +2627,7 @@ async def create_rooms(interaction: discord.Interaction) -> None:
             # 역할 내 모든 유저 제거
             for member in list(role.members):
                 try:
-                    await member.remove_roles(role, reason="방생성 초기화")
+                    await member.remove_roles(role, reason="학급채널생성 초기화")
                     cleared_total += 1
                 except discord.DiscordException:
                     pass
@@ -2300,11 +2750,11 @@ async def create_rooms(interaction: discord.Interaction) -> None:
         )
         await interaction.followup.send(summary, ephemeral=True)
         await log_interaction(
-            interaction, "방생성", None, True,
+            interaction, "학급채널생성", None, True,
             detail=f"채널 {len(CLASS_KEYS)+3}개 생성, 학생 {cleared_total}명 초기화",
         )
     except Exception as exc:
-        await log_interaction(interaction, "방생성", None, False, detail=str(exc))
+        await log_interaction(interaction, "학급채널생성", None, False, detail=str(exc))
         await send_error(interaction, exc)
 
 
@@ -2361,6 +2811,22 @@ async def announce(
                 logger.warning("Failed to announce to %s: %s", ck, e)
                 failed += 1
 
+        # 공지 기록 저장 (최신순 조회용)
+        try:
+            async with SessionLocal() as session:
+                await save_notice(
+                    session,
+                    guild_id=str(guild.id),
+                    scope=범위,
+                    title=제목,
+                    content=내용,
+                    author_discord_user_id=str(interaction.user.id),
+                    author_name=interaction.user.display_name,
+                    sent_count=sent,
+                )
+        except Exception:
+            logger.exception("공지 기록 저장 실패")
+
         await interaction.followup.send(
             f"공지 완료: {sent}개 채널 전송, {failed}개 실패", ephemeral=True
         )
@@ -2372,6 +2838,43 @@ async def announce(
         )
     except Exception as exc:
         await log_interaction(interaction, "공지", f"범위={범위}", False, detail=str(exc))
+        await send_error(interaction, exc)
+
+
+@bot.tree.command(name="공지목록", description="최근 공지를 최신순으로 보여줍니다.")
+async def list_notices(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    try:
+        guild = require_guild(interaction)
+        async with SessionLocal() as session:
+            notices = await list_recent_notices(session, str(guild.id), limit=10)
+
+        if not notices:
+            await interaction.followup.send("등록된 공지가 없습니다.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="📢 최근 공지 (최신순)",
+            color=0x5865F2,
+            timestamp=datetime.now(timezone.utc),
+        )
+        for notice in notices:
+            local = ensure_aware(notice.created_at).astimezone(app_tz())
+            title = notice.title or "공지사항"
+            body = notice.content.strip().replace("\n", " ")
+            if len(body) > 80:
+                body = body[:77] + "..."
+            embed.add_field(
+                name=f"[{notice.scope}] {title}"[:250],
+                value=(
+                    f"{body}\n"
+                    f"🕒 {local.strftime('%Y-%m-%d %H:%M')} · "
+                    f"{notice.author_name or '알 수 없음'} · {notice.sent_count}개 채널"
+                ),
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as exc:
         await send_error(interaction, exc)
 
 
@@ -2911,7 +3414,7 @@ async def assign_class_role(
         if new_role is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"`{class_key}` 역할이 없습니다. /방생성을 먼저 실행하세요.",
+                detail=f"`{class_key}` 역할이 없습니다. /학급채널생성을 먼저 실행하세요.",
             )
         await 멤버.add_roles(new_role, reason=f"반배정: {class_key}")
 
