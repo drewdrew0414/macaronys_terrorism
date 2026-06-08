@@ -26,6 +26,7 @@ from macaronys_backend.enums import (
 from macaronys_backend.models import TeamJoinRequest
 from macaronys_backend.models import (
     Assignment,
+    DiscordChannelMapping,
     DiscordModerationLog,
     DiscordUserLink,
     SchoolClass,
@@ -1758,6 +1759,12 @@ class ScanResultView(discord.ui.View):
         except Exception:
             pass
 
+        # 등록된 대상 반 채널에 새 과제 알림 즉시 전송
+        announced = 0
+        for assignment in created:
+            if await announce_assignment_created(interaction.guild, assignment):
+                announced += 1
+
         lines = "\n".join(f"- `{a.id[:8]}` {a.title}" for a in created[:10])
         if len(created) > 10:
             lines += f"\n…외 {len(created) - 10}개"
@@ -1767,8 +1774,9 @@ class ScanResultView(discord.ui.View):
             if skipped
             else ""
         )
+        sent_note = f" · 반 채널 알림 {announced}건 전송" if announced else ""
         await interaction.followup.send(
-            f"✅ {len(created)}개 과제를 등록하고 알림을 예약했어요{target_note}.\n{lines}{note}",
+            f"✅ {len(created)}개 과제를 등록하고 알림을 예약했어요{target_note}{sent_note}.\n{lines}{note}",
             ephemeral=True,
         )
 
@@ -2270,6 +2278,84 @@ async def clear_channel_history(
         await send_error(interaction, exc)
 
 
+def configured_channel_id_for_class(class_key: str) -> str | None:
+    """config.json의 discord.channels에서 class_key의 채널 ID를 찾는다."""
+    config = load_runtime_config()
+    item = config.get("discord", {}).get("channels", {}).get(class_key, {})
+    if not isinstance(item, dict):
+        return None
+    cid = str(item.get("channel_id") or "").strip()
+    return cid if cid and cid not in PLACEHOLDER_VALUES else None
+
+
+async def resolve_class_channel_id(guild: discord.Guild, class_id: str, class_key: str) -> str | None:
+    """반 채널 ID 해석: config.json → DB 채널매핑 → 이름이 class_key인 채널."""
+    cid = configured_channel_id_for_class(class_key)
+    if cid:
+        return cid
+    async with SessionLocal() as session:
+        row = await session.execute(
+            select(DiscordChannelMapping)
+            .where(DiscordChannelMapping.class_id == class_id)
+            .where(DiscordChannelMapping.enabled.is_(True))
+            .limit(1)
+        )
+        mapping = row.scalar_one_or_none()
+        if mapping is not None:
+            return mapping.channel_id
+    ch = discord.utils.get(guild.text_channels, name=class_key)
+    return str(ch.id) if ch else None
+
+
+async def announce_assignment_created(
+    guild: discord.Guild | None,
+    assignment: Assignment,
+) -> bool:
+    """과제가 등록되면 해당 반 채널에 새 과제 알림 메시지를 즉시 보낸다."""
+    if guild is None or not assignment.class_id:
+        return False
+    async with SessionLocal() as session:
+        school_class = await session.get(SchoolClass, assignment.class_id)
+    if school_class is None:
+        return False
+    class_key = school_class.class_key
+
+    channel_id = await resolve_class_channel_id(guild, assignment.class_id, class_key)
+    if not channel_id:
+        return False
+    try:
+        channel = guild.get_channel(int(channel_id)) or await guild.fetch_channel(int(channel_id))
+    except Exception:
+        return False
+    if not isinstance(channel, discord.TextChannel):
+        return False
+
+    local = ensure_aware(assignment.due_at).astimezone(app_tz())
+    _, remain = remaining_text(assignment.due_at)
+    embed = discord.Embed(
+        title="📚 새 과제 등록",
+        color=0x5865F2,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="제목", value=assignment.title[:250], inline=False)
+    if assignment.subject:
+        embed.add_field(name="과목", value=assignment.subject, inline=True)
+    embed.add_field(name="마감", value=f"{local.strftime('%Y-%m-%d %H:%M')} ({remain})", inline=True)
+    if assignment.submit_method:
+        embed.add_field(name="제출", value=assignment.submit_method[:200], inline=True)
+    if assignment.context:
+        embed.add_field(name="설명", value=assignment.context[:1000], inline=False)
+    embed.set_footer(text=f"{class_key} · 과제 ID: {assignment.id[:8]}")
+
+    role = discord.utils.get(guild.roles, name=class_key)
+    try:
+        await channel.send(content=role.mention if role else None, embed=embed)
+        return True
+    except Exception:
+        logger.exception("새 과제 알림 전송 실패: class=%s channel=%s", class_key, channel_id)
+        return False
+
+
 @bot.tree.command(name="과제추가", description="과제를 등록합니다. 대상 반/학년을 지정하거나, 비우면 현재 채널/본인 반 기준입니다.")
 @app_commands.describe(
     제목="과제명",
@@ -2337,14 +2423,23 @@ async def add_assignment(
                 created.append((class_key, assignment))
             await session.commit()
 
+        # 등록된 대상 반 채널에 새 과제 알림 즉시 전송
+        announced = 0
+        for _, assignment in created:
+            if await announce_assignment_created(interaction.guild, assignment):
+                announced += 1
+
         if len(created) == 1:
             class_key, assignment = created[0]
             label = f" [{class_key}]" if class_key else ""
-            await interaction.followup.send(f"과제 등록 완료{label}: `{assignment.id[:8]}` {제목}")
+            sent = " · 반 채널 알림 전송됨" if announced else ""
+            await interaction.followup.send(
+                f"과제 등록 완료{label}: `{assignment.id[:8]}` {제목}{sent}"
+            )
         else:
             keys = ", ".join(class_key for class_key, _ in created if class_key)
             await interaction.followup.send(
-                f"과제 {len(created)}개 등록 완료 — 대상: {keys}\n제목: {제목}"
+                f"과제 {len(created)}개 등록 완료 — 대상: {keys}\n제목: {제목}\n반 채널 알림 {announced}건 전송"
             )
     except Exception as exc:
         await send_error(interaction, exc)
