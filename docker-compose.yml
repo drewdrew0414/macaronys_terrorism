@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    command: python app.py
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      OLLAMA_HOST: ${DOCKER_OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  discord-bot:
+    build: .
+    command: python app.py discord-bot
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      OLLAMA_HOST: ${DOCKER_OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles:
+      - bot
+    restart: unless-stopped
