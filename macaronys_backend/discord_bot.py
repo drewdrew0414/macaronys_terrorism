@@ -38,7 +38,6 @@ from macaronys_backend.schemas.team_project import (
     TeamProjectCreate,
 )
 from macaronys_backend.services.assignment_service import (
-    accept_candidate,
     create_assignment,
     list_assignments,
 )
@@ -97,6 +96,7 @@ from macaronys_backend.services.discord_management_service import (
 from macaronys_backend.services.discord_service import (
     get_channel_class_id,
     get_linked_user,
+    get_or_create_school_class_by_key,
     link_discord_user,
     require_linked_user,
     resolve_context_class_id,
@@ -172,6 +172,44 @@ def resolve_class_targets(value: str) -> list[str]:
     if v in GRADE_CLASS_MAP:
         return GRADE_CLASS_MAP[v]
     return [v]
+
+
+async def resolve_target_class_ids(session, value: str) -> list[tuple[str, str]]:
+    """대상 입력('all'/'1학년'/'1-1')을 [(class_key, class_id), ...]로 변환한다.
+
+    선생님이 콘솔·선생님 채널처럼 반과 연결되지 않은 곳에서 명령을 쓸 때,
+    대상 반/학년을 직접 지정할 수 있게 해 준다. 존재하지 않는 학급은 생성한다.
+    유효한 학급 키(1-1~3-4)만 받아들이고, 하나도 없으면 빈 목록을 돌려준다.
+    """
+    keys = [k for k in resolve_class_targets(value) if k in CLASS_KEYS]
+    pairs: list[tuple[str, str]] = []
+    for class_key in keys:
+        school_class = await get_or_create_school_class_by_key(session, class_key)
+        pairs.append((class_key, school_class.id))
+    return pairs
+
+
+def class_target_choices(current: str) -> list[app_commands.Choice[str]]:
+    """대상 반/학년 자동완성: 전체 / 1~3학년 / 1-1~3-4."""
+    options: list[tuple[str, str]] = [
+        ("전체 (all)", "all"),
+        ("1학년 전체", "1학년"),
+        ("2학년 전체", "2학년"),
+        ("3학년 전체", "3학년"),
+    ] + [(ck, ck) for ck in CLASS_KEYS]
+    needle = current.strip().lower()
+    return [
+        app_commands.Choice(name=name, value=value)
+        for name, value in options
+        if not needle or needle in name.lower() or needle in value.lower()
+    ][:AUTOCOMPLETE_LIMIT]
+
+
+async def autocomplete_class_target(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    return class_target_choices(current)
 
 
 # ─── 모던 임베드 헬퍼 ────────────────────────────────────────────────────────
@@ -1378,6 +1416,7 @@ class _ScanTask:
         requester_id: int,
         guild_id: str | None,
         channel: discord.abc.Messageable,
+        target: str | None = None,
     ) -> None:
         self.job_id = job_id
         self.source_id = source_id
@@ -1386,6 +1425,7 @@ class _ScanTask:
         self.requester_id = requester_id
         self.guild_id = guild_id
         self.channel = channel
+        self.target = target  # 등록 대상 반/학년 (예: 1-1, 1학년, all). None이면 본인 반
 
 
 class AiScanQueue:
@@ -1522,6 +1562,7 @@ async def enqueue_scan(
     requester_id: int,
     guild_id: str | None,
     channel: discord.abc.Messageable,
+    target: str | None = None,
 ) -> int:
     """자료/AI잡을 만들고(외부 워커가 못 가져가게 잠금) 순차 큐에 넣는다."""
     async with SessionLocal() as session:
@@ -1540,6 +1581,7 @@ async def enqueue_scan(
         requester_id=requester_id,
         guild_id=guild_id,
         channel=channel,
+        target=target,
     )
     return await ai_scan_queue.submit(task)
 
@@ -1583,14 +1625,15 @@ async def send_scan_results(task: _ScanTask, candidates: list) -> None:
     for candidate in pending[:10]:
         name, value = _format_candidate_field(candidate)
         embed.add_field(name=name, value=value, inline=False)
+    target_note = f" · 등록 대상: {task.target}" if task.target else ""
     if len(pending) > 10:
-        embed.set_footer(text=f"외 {len(pending) - 10}건 더 있음 · 확인 후 아래 버튼으로 등록하세요")
+        embed.set_footer(text=f"외 {len(pending) - 10}건 더 있음 · 확인 후 아래 버튼으로 등록하세요{target_note}")
     else:
-        embed.set_footer(text="확인 후 아래 버튼으로 등록하세요")
+        embed.set_footer(text=f"확인 후 아래 버튼으로 등록하세요{target_note}")
 
     registerable = any(c.due_at is not None for c in pending)
     view = (
-        ScanResultView(task.source_id, task.requester_id, task.guild_id)
+        ScanResultView(task.source_id, task.requester_id, task.guild_id, task.target)
         if registerable
         else None
     )
@@ -1601,8 +1644,13 @@ async def register_scanned_candidates(
     source_id: str,
     requester_discord_id: str,
     guild_id: str | None,
+    target: str | None = None,
 ) -> tuple[list[Assignment], int]:
-    """마감일이 있는 추출 후보를 과제로 확정하고 알림을 예약한다."""
+    """마감일이 있는 추출 후보를 과제로 확정하고 알림을 예약한다.
+
+    target(대상 반/학년)이 주어지면 후보마다 대상 반별로 과제를 만든다.
+    없으면 등록자(연동 사용자)의 반으로 후보당 1개씩 만든다.
+    """
     async with SessionLocal() as session:
         candidates = await list_candidates(session, source_id)
         pending = [c for c in candidates if c.status == CandidateStatus.pending.value]
@@ -1611,7 +1659,7 @@ async def register_scanned_candidates(
         if not registerable:
             return [], skipped
 
-        # 등록자(연동 사용자)와 반 컨텍스트 해석
+        # 등록자(연동 사용자) 해석
         user = None
         if guild_id:
             user = await get_linked_user(session, guild_id, requester_discord_id)
@@ -1624,30 +1672,57 @@ async def register_scanned_candidates(
             link = row.scalar_one_or_none()
             if link is not None:
                 user = await session.get(User, link.user_id)
-        class_id = user.class_id if user else None
+        creator_id = user.id if user else None
+
+        # 대상 반/학년 → class_id 목록 (없으면 등록자 반 1개)
+        if target and target.strip():
+            target_pairs = await resolve_target_class_ids(session, target.strip())
+            if not target_pairs:
+                raise HTTPException(
+                    status_code=422,
+                    detail="대상 반/학년을 인식하지 못했습니다. 예: 1-1, 1학년, all",
+                )
+            class_ids = [class_id for _, class_id in target_pairs]
+        else:
+            class_ids = [user.class_id if user else None]
 
         created: list[Assignment] = []
         for candidate in registerable:
-            assignment = await accept_candidate(session, candidate.id)
-            if class_id or user is not None:
-                assignment.class_id = class_id
-                assignment.creator_id = user.id if user else None
-                await session.commit()
-                await session.refresh(assignment)
-            await rebuild_notifications_for_assignment(session, assignment)
+            for class_id in class_ids:
+                assignment = Assignment(
+                    title=candidate.title,
+                    subject=candidate.subject,
+                    due_at=candidate.due_at,
+                    submit_method=candidate.submit_method,
+                    source_id=candidate.source_id,
+                    source_quote=candidate.source_quote,
+                    class_id=class_id,
+                    creator_id=creator_id,
+                )
+                session.add(assignment)
+                await session.flush()
+                await rebuild_notifications_for_assignment(session, assignment)
+                created.append(assignment)
+            candidate.status = CandidateStatus.accepted.value
             await session.commit()
-            created.append(assignment)
     return created, skipped
 
 
 class ScanResultView(discord.ui.View):
     """추출 결과를 과제로 등록하는 버튼. (요청자 본인 또는 선생님/관리자만)"""
 
-    def __init__(self, source_id: str, requester_id: int, guild_id: str | None) -> None:
+    def __init__(
+        self,
+        source_id: str,
+        requester_id: int,
+        guild_id: str | None,
+        target: str | None = None,
+    ) -> None:
         super().__init__(timeout=600)
         self._source_id = source_id
         self._requester_id = requester_id
         self._guild_id = guild_id
+        self._target = target
 
     @discord.ui.button(label="✅ 과제로 등록", style=discord.ButtonStyle.success)
     async def register(
@@ -1663,7 +1738,7 @@ class ScanResultView(discord.ui.View):
             return
         try:
             created, skipped = await register_scanned_candidates(
-                self._source_id, str(interaction.user.id), self._guild_id
+                self._source_id, str(interaction.user.id), self._guild_id, self._target
             )
         except Exception as exc:
             await interaction.followup.send(f"등록 실패: {exc}", ephemeral=True)
@@ -1683,14 +1758,17 @@ class ScanResultView(discord.ui.View):
         except Exception:
             pass
 
-        lines = "\n".join(f"- `{a.id[:8]}` {a.title}" for a in created)
+        lines = "\n".join(f"- `{a.id[:8]}` {a.title}" for a in created[:10])
+        if len(created) > 10:
+            lines += f"\n…외 {len(created) - 10}개"
+        target_note = f" (대상: {self._target})" if self._target else ""
         note = (
             f"\n\n⚠️ 마감일이 없어 제외된 {skipped}건은 /과제추가로 직접 등록하세요."
             if skipped
             else ""
         )
         await interaction.followup.send(
-            f"✅ {len(created)}개 과제를 등록하고 알림을 예약했어요.\n{lines}{note}",
+            f"✅ {len(created)}개 과제를 등록하고 알림을 예약했어요{target_note}.\n{lines}{note}",
             ephemeral=True,
         )
 
@@ -2192,14 +2270,16 @@ async def clear_channel_history(
         await send_error(interaction, exc)
 
 
-@bot.tree.command(name="과제추가", description="현재 채널/사용자 반 기준으로 과제를 등록합니다.")
+@bot.tree.command(name="과제추가", description="과제를 등록합니다. 대상 반/학년을 지정하거나, 비우면 현재 채널/본인 반 기준입니다.")
 @app_commands.describe(
     제목="과제명",
     마감="YYYY-MM-DD HH:MM 또는 2026-06-14T23:59:00+09:00",
     과목="과목명",
     제출="제출 방식",
     설명="상세 설명",
+    대상="대상 반/학년 (예: 1-1, 1학년, all). 비우면 현재 채널/본인 반",
 )
+@app_commands.autocomplete(대상=autocomplete_class_target)
 async def add_assignment(
     interaction: discord.Interaction,
     제목: str,
@@ -2207,10 +2287,12 @@ async def add_assignment(
     과목: str | None = None,
     제출: str | None = None,
     설명: str | None = None,
+    대상: str | None = None,
 ) -> None:
     await interaction.response.defer()
     try:
         require_console_channel(interaction)
+        due_at = parse_due_at(마감)
         async with SessionLocal() as session:
             user = await require_linked_user(
                 session,
@@ -2218,28 +2300,52 @@ async def add_assignment(
                 str(interaction.user.id),
             )
             require_teacher_or_admin(interaction, user)
-            class_id = await resolve_context_class_id(
-                session,
-                guild_id_from(interaction),
-                channel_id_from(interaction),
-                user,
-            )
-            assignment = await create_assignment(
-                session,
-                AssignmentCreate(
-                    title=제목,
-                    due_at=parse_due_at(마감),
-                    creator_id=user.id,
-                    class_id=class_id,
-                    subject=과목,
-                    submit_method=제출,
-                    context=설명,
-                    status=AssignmentStatus.pending,
-                ),
-            )
-            await rebuild_notifications_for_assignment(session, assignment)
+
+            # 대상 지정 시 반별로 과제를 하나씩 만든다(학년/전체면 여러 개).
+            if 대상 and 대상.strip():
+                targets = await resolve_target_class_ids(session, 대상.strip())
+                if not targets:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="대상 반/학년을 인식하지 못했습니다. 예: 1-1, 1학년, all",
+                    )
+            else:
+                class_id = await resolve_context_class_id(
+                    session,
+                    guild_id_from(interaction),
+                    channel_id_from(interaction),
+                    user,
+                )
+                targets = [(None, class_id)]
+
+            created: list[tuple[str | None, object]] = []
+            for class_key, class_id in targets:
+                assignment = await create_assignment(
+                    session,
+                    AssignmentCreate(
+                        title=제목,
+                        due_at=due_at,
+                        creator_id=user.id,
+                        class_id=class_id,
+                        subject=과목,
+                        submit_method=제출,
+                        context=설명,
+                        status=AssignmentStatus.pending,
+                    ),
+                )
+                await rebuild_notifications_for_assignment(session, assignment)
+                created.append((class_key, assignment))
             await session.commit()
-        await interaction.followup.send(f"과제 등록 완료: `{assignment.id[:8]}` {제목}")
+
+        if len(created) == 1:
+            class_key, assignment = created[0]
+            label = f" [{class_key}]" if class_key else ""
+            await interaction.followup.send(f"과제 등록 완료{label}: `{assignment.id[:8]}` {제목}")
+        else:
+            keys = ", ".join(class_key for class_key, _ in created if class_key)
+            await interaction.followup.send(
+                f"과제 {len(created)}개 등록 완료 — 대상: {keys}\n제목: {제목}"
+            )
     except Exception as exc:
         await send_error(interaction, exc)
 
@@ -2267,11 +2373,14 @@ async def show_assignments(interaction: discord.Interaction) -> None:
 @app_commands.describe(
     내용="공지 텍스트 (선택)",
     파일="PDF 또는 TXT 파일 (선택)",
+    대상="등록 대상 반/학년 (예: 1-1, 1학년, all). 비우면 본인 반",
 )
+@app_commands.autocomplete(대상=autocomplete_class_target)
 async def scan_assignments(
     interaction: discord.Interaction,
     내용: str | None = None,
     파일: discord.Attachment | None = None,
+    대상: str | None = None,
 ) -> None:
     await interaction.response.defer(ephemeral=True)
     try:
@@ -2290,6 +2399,7 @@ async def scan_assignments(
             requester_id=interaction.user.id,
             guild_id=guild_id,
             channel=interaction.channel,
+            target=(대상.strip() if 대상 and 대상.strip() else None),
         )
         if ahead > 0:
             await interaction.followup.send(
@@ -3738,11 +3848,19 @@ async def close_vote_cmd(
 
 # ─── 시간표 ──────────────────────────────────────────────────────────────────
 
-@bot.tree.command(name="시간표", description="현재 학급 채널의 오늘 시간표를 보여줍니다.")
-async def timetable_cmd(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="시간표", description="오늘 시간표를 보여줍니다. 반을 지정하거나, 비우면 현재 채널 기준입니다.")
+@app_commands.describe(반="조회할 반 (예: 1-1). 비우면 현재 채널 기준")
+@app_commands.autocomplete(반=autocomplete_class_key)
+async def timetable_cmd(
+    interaction: discord.Interaction,
+    반: str | None = None,
+) -> None:
     await interaction.response.defer(ephemeral=True)
     try:
-        class_key = await resolve_timetable_class_key(interaction)
+        if 반 and 반.strip():
+            class_key = 반.strip()
+        else:
+            class_key = await resolve_timetable_class_key(interaction)
         grade, class_nm = parse_class_for_neis(class_key)
         now = kst_now()
         date_str_val = kst_date_str(now)
