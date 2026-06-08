@@ -110,6 +110,8 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE team_projects ADD COLUMN IF NOT EXISTS recruit_deadline TIMESTAMPTZ"))
         await conn.execute(text("ALTER TABLE team_projects ADD COLUMN IF NOT EXISTS notification_scope VARCHAR(40)"))
         await conn.execute(text("ALTER TABLE assignments ADD COLUMN IF NOT EXISTS notification_scope VARCHAR(40)"))
+        await conn.execute(text("ALTER TABLE assignments ADD COLUMN IF NOT EXISTS is_personal BOOLEAN NOT NULL DEFAULT FALSE"))
+        await conn.execute(text("ALTER TABLE assignments ADD COLUMN IF NOT EXISTS owner_discord_user_id VARCHAR(120)"))
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS team_join_requests (
                 id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
