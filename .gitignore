@@ -1,0 +1,25 @@
+.idea/
+.venv/
+.env
+.env.*
+!.env.example
+
+# Python/runtime cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+tests/coverage_html/
+
+# Local OS/editor files
+.DS_Store
+
+# Runtime data
+data/
+
+# Streamlit local state
+.streamlit/secrets.toml
+
+.agents
+.claude
