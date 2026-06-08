@@ -138,6 +138,8 @@ class Assignment(Base):
     )
     source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
     notification_scope: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    is_personal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    owner_discord_user_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
