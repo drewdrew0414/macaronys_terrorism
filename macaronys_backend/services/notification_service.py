@@ -20,17 +20,23 @@ DEFAULT_NOTIFICATION_RULES: tuple[tuple[int, NotificationChannel], ...] = (
     (3 * 24 * 60, NotificationChannel.discord),   # 3일 전
     (24 * 60, NotificationChannel.discord),         # 1일 전
     (12 * 60, NotificationChannel.discord),          # 12시간 전
+    (6 * 60, NotificationChannel.discord),           # 6시간 전
+    (3 * 60, NotificationChannel.discord),           # 3시간 전
     (60, NotificationChannel.discord),               # 1시간 전
     (30, NotificationChannel.discord),               # 30분 전
 )
 
 
 async def ensure_default_notification_rules(session: AsyncSession) -> None:
-    existing = await session.execute(select(NotificationRule.id).limit(1))
-    if existing.scalar_one_or_none() is not None:
-        return
+    """기본 알림 규칙 중 빠진 것을 추가한다(멱등). 기존 DB에도 신규 규칙이 반영된다."""
+    rows = await session.execute(
+        select(NotificationRule.offset_minutes, NotificationRule.channel)
+    )
+    existing = {(offset, channel) for offset, channel in rows.all()}
 
     for offset_minutes, channel in DEFAULT_NOTIFICATION_RULES:
+        if (offset_minutes, channel.value) in existing:
+            continue
         session.add(
             NotificationRule(
                 offset_minutes=offset_minutes,
