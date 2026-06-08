@@ -422,7 +422,16 @@
       },
       {
         "name": "과제목록",
-        "description": "Show assignments ordered by remaining time."
+        "description": "Show active assignments ordered by due time. Assignments more than a month past due are hidden."
+      },
+      {
+        "name": "과제스캔",
+        "description": "Extract assignments from a notice text or PDF/TXT with local AI. Works in DM too.",
+        "autocomplete": []
+      },
+      {
+        "name": "공지목록",
+        "description": "Show recent announcements, newest first."
       },
       {
         "name": "급식",
@@ -465,7 +474,7 @@
         ]
       },
       {
-        "name": "팀평가요약",
+        "name": "팀평가보기",
         "description": "Show review summary without writer identity.",
         "autocomplete": [
           "프로젝트id"
@@ -492,7 +501,7 @@
         "description": "Delete recent messages or recreate a channel to clear all history. Log channel is protected."
       },
       {
-        "name": "방생성",
+        "name": "학급채널생성",
         "description": "Auto-create class channels, teacher channels, log channel, and roles.",
         "teacher_only": false,
         "admin_only": true
