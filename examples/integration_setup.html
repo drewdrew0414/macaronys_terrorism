@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Macaronys Integration Setup</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f4;
+      --panel: #ffffff;
+      --line: #d9ded6;
+      --text: #18201b;
+      --muted: #687268;
+      --accent: #147a64;
+      --accent-2: #b84a34;
+      --soft: #edf4ef;
+      --code: #111816;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 72px;
+      gap: 16px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+
+    .subtle {
+      color: var(--muted);
+      margin: 2px 0 0;
+    }
+
+    main {
+      padding: 24px 0 40px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    section,
+    aside {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .section-head {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfa;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 720;
+      letter-spacing: 0;
+    }
+
+    .content {
+      padding: 18px;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+      margin-bottom: 14px;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+      background: #fff;
+      font: inherit;
+      padding: 10px 11px;
+      min-height: 42px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 210px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(20, 122, 100, 0.12);
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    button,
+    a.button {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      min-height: 40px;
+      padding: 9px 13px;
+      font: inherit;
+      font-weight: 720;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    button.secondary,
+    a.button.secondary {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--line);
+    }
+
+    button.warn {
+      background: var(--accent-2);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .command {
+      background: var(--code);
+      color: #dce7df;
+      border-radius: 8px;
+      padding: 14px;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      min-height: 82px;
+    }
+
+    .mapping {
+      display: grid;
+      gap: 10px;
+    }
+
+    .map-row {
+      display: grid;
+      grid-template-columns: 82px 1fr;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .key {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      border-radius: 8px;
+      background: var(--soft);
+      border: 1px solid #cfe0d4;
+      font-weight: 750;
+      color: #174b3f;
+    }
+
+    .status {
+      min-height: 22px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
+    @media (max-width: 920px) {
+      .layout,
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 16px 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell topbar">
+      <div>
+        <h1>Macaronys Integration Setup</h1>
+        <p class="subtle">Discord 봇 초대, 채널 매핑, 알림 dispatch 요청 예시</p>
+      </div>
+      <a class="button secondary" href="../config.json" target="_blank" rel="noreferrer">config.json 열기</a>
+    </div>
+  </header>
+
+  <main class="shell layout">
+    <aside>
+      <div class="section-head">
+        <h2>기본값</h2>
+      </div>
+      <div class="content">
+        <label>
+          Backend URL
+          <input id="backendUrl" value="http://localhost:8000">
+        </label>
+        <label>
+          Worker Token
+          <input id="workerToken" value="replace-with-random-32-byte-token">
+        </label>
+        <label>
+          Discord Application Client ID
+          <input id="clientId" value="DISCORD_APPLICATION_CLIENT_ID_HERE">
+        </label>
+        <label>
+          Discord Permissions Integer
+          <input id="permissions" value="84992">
+        </label>
+        <div class="button-row">
+          <button id="refreshButton" type="button">생성</button>
+          <button id="copyConfigButton" class="secondary" type="button">JSON 복사</button>
+        </div>
+        <p id="status" class="status"></p>
+      </div>
+    </aside>
+
+    <section>
+      <div class="section-head">
+        <h2>Discord 봇 추가</h2>
+      </div>
+      <div class="content">
+        <div class="grid">
+          <label>
+            Invite URL
+            <input id="inviteUrl" readonly>
+          </label>
+          <label>
+            Webhook ENV
+            <input value="DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/..." readonly>
+          </label>
+        </div>
+        <div class="button-row">
+          <a id="openInviteButton" class="button" href="#" target="_blank" rel="noreferrer">봇 초대 열기</a>
+          <button id="copyInviteButton" class="secondary" type="button">초대 URL 복사</button>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <h2>채널 연동</h2>
+      </div>
+      <div class="content">
+        <div id="mapping" class="mapping"></div>
+      </div>
+
+      <div class="section-head">
+        <h2>API 요청 예시</h2>
+      </div>
+      <div class="content">
+        <div class="grid">
+          <div>
+            <label>
+              due 알림 dispatch
+              <pre id="dispatchCommand" class="command"></pre>
+            </label>
+            <button class="secondary" type="button" data-copy="dispatchCommand">명령 복사</button>
+          </div>
+        </div>
+        <label>
+          생성된 config.json 예시
+          <textarea id="configOutput" spellcheck="false"></textarea>
+        </label>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const classKeys = [
+      "1-1", "1-2", "1-3", "1-4",
+      "2-1", "2-2", "2-3", "2-4",
+      "3-1", "3-2", "3-3", "3-4",
+      "console"
+    ];
+
+    const labels = {
+      "1-1": "1학년 1반",
+      "1-2": "1학년 2반",
+      "1-3": "1학년 3반",
+      "1-4": "1학년 4반",
+      "2-1": "2학년 1반",
+      "2-2": "2학년 2반",
+      "2-3": "2학년 3반",
+      "2-4": "2학년 4반",
+      "3-1": "3학년 1반",
+      "3-2": "3학년 2반",
+      "3-3": "3학년 3반",
+      "3-4": "3학년 4반",
+      "console": "운영 콘솔"
+    };
+
+    const state = {
+      channels: Object.fromEntries(classKeys.map((key) => [key, "CHANNEL_ID_HERE"]))
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function renderMapping() {
+      const root = $("mapping");
+      root.innerHTML = "";
+      classKeys.forEach((key) => {
+        const row = document.createElement("div");
+        row.className = "map-row";
+
+        const keyNode = document.createElement("div");
+        keyNode.className = "key";
+        keyNode.textContent = key;
+
+        const input = document.createElement("input");
+        input.value = state.channels[key];
+        input.setAttribute("aria-label", `${labels[key]} Discord channel ID`);
+        input.addEventListener("input", () => {
+          state.channels[key] = input.value.trim() || "CHANNEL_ID_HERE";
+          refresh();
+        });
+
+        row.append(keyNode, input);
+        root.append(row);
+      });
+    }
+
+    function buildInviteUrl() {
+      const clientId = encodeURIComponent($("clientId").value.trim());
+      const permissions = encodeURIComponent($("permissions").value.trim());
+      return `https://discord.com/oauth2/authorize?client_id=${clientId}&permissions=${permissions}&scope=bot%20applications.commands`;
+    }
+
+    function buildConfig() {
+      const channels = {};
+      classKeys.forEach((key) => {
+        channels[key] = {
+          label: labels[key],
+          channel_id: state.channels[key],
+          enabled: true,
+          notify: true
+        };
+      });
+
+      return {
+        schema_version: 1,
+        backend: {
+          base_url: $("backendUrl").value.trim(),
+          worker_token_header: "X-Worker-Token"
+        },
+        discord: {
+          bot: {
+            application_client_id: $("clientId").value.trim(),
+            permissions_integer: $("permissions").value.trim(),
+            scopes: ["bot", "applications.commands"],
+            invite_url: buildInviteUrl()
+          },
+          channels
+        }
+      };
+    }
+
+    function buildDispatchCommand() {
+      const base = $("backendUrl").value.trim().replace(/\/$/, "");
+      const token = $("workerToken").value.trim();
+      return [
+        `curl -X POST "${base}/api/notifications/dispatch-due?limit=20" \\`,
+        `  -H "X-Worker-Token: ${token}"`
+      ].join("\n");
+    }
+
+    function refresh() {
+      const inviteUrl = buildInviteUrl();
+      $("inviteUrl").value = inviteUrl;
+      $("openInviteButton").href = inviteUrl;
+      $("dispatchCommand").textContent = buildDispatchCommand();
+      $("configOutput").value = JSON.stringify(buildConfig(), null, 2);
+    }
+
+    async function copyText(text) {
+      await navigator.clipboard.writeText(text);
+      $("status").textContent = "클립보드에 복사했습니다.";
+      window.setTimeout(() => {
+        $("status").textContent = "";
+      }, 1800);
+    }
+
+    renderMapping();
+    refresh();
+
+    ["backendUrl", "workerToken", "clientId", "permissions"].forEach((id) => {
+      $(id).addEventListener("input", refresh);
+    });
+
+    $("refreshButton").addEventListener("click", refresh);
+    $("copyInviteButton").addEventListener("click", () => copyText($("inviteUrl").value));
+    $("copyConfigButton").addEventListener("click", () => copyText($("configOutput").value));
+
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", () => {
+        copyText($(button.dataset.copy).textContent);
+      });
+    });
+  </script>
+</body>
+</html>
