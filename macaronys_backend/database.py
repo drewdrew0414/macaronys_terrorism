@@ -184,6 +184,23 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_command_logs_created_at ON command_logs(created_at DESC)
         """))
         await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS notices (
+                id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                guild_id TEXT NOT NULL,
+                scope VARCHAR(40) NOT NULL,
+                title VARCHAR(255),
+                content TEXT NOT NULL,
+                author_discord_user_id TEXT NOT NULL,
+                author_name VARCHAR(120),
+                sent_count INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_notices_guild_created
+            ON notices(guild_id, created_at DESC)
+        """))
+        await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS registrations (
                 id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
                 guild_id TEXT NOT NULL,
