@@ -1,0 +1,599 @@
+{
+  "schema_version": 4,
+  "project": {
+    "name": "Macaronys Assignment Backend",
+    "timezone": "Asia/Seoul",
+    "example_html": "examples/integration_setup.html",
+    "secret_policy": "runtime secrets are kept in .env only; config.json contains public wiring metadata"
+  },
+  "quality_controls": {
+    "ui_ux": {
+      "target_users": [
+        "middle_school_students",
+        "high_school_students",
+        "teachers"
+      ],
+      "interaction_model": "Discord slash commands with autocomplete, ephemeral feedback for private results, and paginated embeds for dense information.",
+      "minimal_surface": [
+        "student commands expose only daily school workflows",
+        "dangerous admin commands require console channel and confirmation words",
+        "meal and timetable commands do not ask for unnecessary input"
+      ],
+      "design_language": {
+        "primary_component": "discord_embed",
+        "navigation": "pagination_buttons",
+        "tone": "short_korean_labels",
+        "colors": {
+          "primary": "0x5865F2",
+          "success": "0x57F287",
+          "warning": "0xFEE75C",
+          "danger": "0xED4245"
+        }
+      }
+    },
+    "software_architecture": {
+      "folder_policy": {
+        "routers": "HTTP API routes only",
+        "services": "business logic and external integrations",
+        "schemas": "request and response DTOs",
+        "database": "schema and migration-oriented SQL",
+        "tests": "unit and integration tests"
+      },
+      "readme_required_sections": [
+        "setup",
+        "run",
+        "discord_commands",
+        "architecture",
+        "security",
+        "tests",
+        "commit_policy"
+      ],
+      "version_control": {
+        "track": [
+          "source",
+          "tests",
+          "safe templates",
+          "documentation"
+        ],
+        "ignore": [
+          ".env",
+          "runtime data",
+          "virtual environments",
+          "cache files"
+        ],
+        "commit_message_style": "type(scope): imperative summary"
+      }
+    },
+    "security": {
+      "severity_scale": {
+        "4": "credential exposure, unauthenticated worker/admin APIs, destructive command bypass",
+        "3": "over-privileged bot permissions, missing audit logs, broad data exposure",
+        "2": "weak validation, missing timeout, unsafe defaults",
+        "1": "minor hardening or documentation gaps"
+      },
+      "controls": [
+        "no runtime secrets in config.json",
+        "worker APIs require X-Worker-Token",
+        "admin commands are restricted to staff channels and Discord administrators",
+        "bot invite uses least-privilege permissions instead of full admin permission",
+        "moderation actions are written to audit tables",
+        "NEIS and AI external calls use bounded timeouts"
+      ]
+    }
+  },
+  "backend": {
+    "base_url": "http://localhost:8000",
+    "docs_url": "http://localhost:8000/docs",
+    "health_path": "/health",
+    "database": {
+      "mode": "external_postgresql_only",
+      "schema_file": "database/schema.sql",
+      "tables": [
+        "school_classes",
+        "users",
+        "sources",
+        "assignment_candidates",
+        "assignments",
+        "ai_jobs",
+        "notification_rules",
+        "notifications",
+        "discord_guilds",
+        "discord_user_links",
+        "discord_channel_mappings",
+        "discord_moderation_logs",
+        "clubs",
+        "club_members",
+        "voice_rooms",
+        "command_logs",
+        "team_projects",
+        "team_project_members",
+        "peer_reviews",
+        "team_join_requests",
+        "registrations",
+        "votes",
+        "vote_choices",
+        "vote_responses"
+      ]
+    },
+    "ai": {
+      "model_provider": "ollama",
+      "default_model": "gemma3:4b",
+      "default_execution_mode": "local",
+      "local_worker": {
+        "enabled": true,
+        "start_script": "./start.sh",
+        "behavior": "start.sh detects Ollama, lets the user choose an installed model, and starts local workers up to AI_WORKER_CONCURRENCY"
+      },
+      "server_parallel_queue": {
+        "enabled": false,
+        "enable_with_env": "SERVER_OLLAMA_ENABLED=true and AI_EXECUTION_MODE=server",
+        "concurrency_env": "AI_WORKER_CONCURRENCY"
+      }
+    }
+  },
+  "run": {
+    "unix_script": "./start.sh",
+    "windows_script": "start.bat",
+    "default_mode": "all",
+    "supported_modes": [
+      {
+        "name": "all",
+        "description": "Default. Start Docker API, Docker Discord bot, and local Ollama AI worker."
+      },
+      {
+        "name": "docker",
+        "description": "Start Docker API and Docker Discord bot. Local worker is not started."
+      },
+      {
+        "name": "api-only",
+        "description": "Start only the Docker API service."
+      },
+      {
+        "name": "local",
+        "description": "Run FastAPI directly from the local Python virtual environment."
+      },
+      {
+        "name": "worker",
+        "description": "Run the local Ollama/Gemma AI worker in the foreground."
+      },
+      {
+        "name": "discord-bot",
+        "description": "Run the Discord slash-command bot locally in the foreground."
+      }
+    ]
+  },
+  "school": {
+    "classes": [
+      {
+        "key": "1-1",
+        "label": "1학년 1반",
+        "grade": 1,
+        "room": 1
+      },
+      {
+        "key": "1-2",
+        "label": "1학년 2반",
+        "grade": 1,
+        "room": 2
+      },
+      {
+        "key": "1-3",
+        "label": "1학년 3반",
+        "grade": 1,
+        "room": 3
+      },
+      {
+        "key": "1-4",
+        "label": "1학년 4반",
+        "grade": 1,
+        "room": 4
+      },
+      {
+        "key": "2-1",
+        "label": "2학년 1반",
+        "grade": 2,
+        "room": 1
+      },
+      {
+        "key": "2-2",
+        "label": "2학년 2반",
+        "grade": 2,
+        "room": 2
+      },
+      {
+        "key": "2-3",
+        "label": "2학년 3반",
+        "grade": 2,
+        "room": 3
+      },
+      {
+        "key": "2-4",
+        "label": "2학년 4반",
+        "grade": 2,
+        "room": 4
+      },
+      {
+        "key": "3-1",
+        "label": "3학년 1반",
+        "grade": 3,
+        "room": 1
+      },
+      {
+        "key": "3-2",
+        "label": "3학년 2반",
+        "grade": 3,
+        "room": 2
+      },
+      {
+        "key": "3-3",
+        "label": "3학년 3반",
+        "grade": 3,
+        "room": 3
+      },
+      {
+        "key": "3-4",
+        "label": "3학년 4반",
+        "grade": 3,
+        "room": 4
+      }
+    ]
+  },
+  "discord": {
+    "enabled": true,
+    "bot": {
+      "application_client_id": "1513099036209709246",
+      "permissions_integer": "2435968018",
+      "scopes": [
+        "bot",
+        "applications.commands"
+      ],
+      "invite_url_template": "https://discord.com/oauth2/authorize?client_id={application_client_id}&permissions={permissions_integer}&scope=bot%20applications.commands",
+      "minimum_permissions": [
+        "Kick Members",
+        "Manage Channels",
+        "Manage Messages",
+        "Manage Roles",
+        "View Channels",
+        "Send Messages",
+        "Embed Links",
+        "Attach Files",
+        "Read Message History",
+        "Connect",
+        "Speak",
+        "Move Members",
+        "Use Application Commands"
+      ],
+      "required_privileged_intents": [
+        "Server Members Intent"
+      ],
+      "autocomplete": {
+        "enabled": true,
+        "sources": [
+          "school_classes.class_key",
+          "assignments.id",
+          "team_projects.id"
+        ]
+      },
+      "token_source": ".env"
+    },
+    "admin": {
+      "console_channel_key": "console",
+      "console_channel_id": "CHANNEL_ID_HERE",
+      "commands_only_in_console": true,
+      "requires_discord_administrator": true,
+      "confirmation_words": {
+        "role_move": "역할이동",
+        "role_bulk_add": "역할추가",
+        "role_bulk_remove": "역할제거",
+        "bulk_kick": "추방",
+        "channel_purge": "삭제",
+        "channel_recreate_clear": "전체삭제"
+      },
+      "audit_table": "discord_moderation_logs"
+    },
+    "guilds": [
+      {
+        "label": "school-server",
+        "guild_id": "GUILD_ID_HERE",
+        "default_channel_key": "console",
+        "enabled": true
+      }
+    ],
+    "channels": {
+      "1-1": {
+        "label": "1학년 1반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "1-2": {
+        "label": "1학년 2반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "1-3": {
+        "label": "1학년 3반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "1-4": {
+        "label": "1학년 4반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "2-1": {
+        "label": "2학년 1반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "2-2": {
+        "label": "2학년 2반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "2-3": {
+        "label": "2학년 3반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "2-4": {
+        "label": "2학년 4반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "3-1": {
+        "label": "3학년 1반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "3-2": {
+        "label": "3학년 2반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "3-3": {
+        "label": "3학년 3반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "3-4": {
+        "label": "3학년 4반",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": true
+      },
+      "console": {
+        "label": "운영 콘솔",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": false
+      },
+      "log": {
+        "label": "로그",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": false,
+        "teacher_only": true,
+        "no_recreate": true
+      },
+      "recruitment": {
+        "label": "팀원모집",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": false,
+        "public": true
+      },
+      "teacher": {
+        "label": "선생님",
+        "channel_id": "CHANNEL_ID_HERE",
+        "enabled": true,
+        "notify": false,
+        "teacher_only": true
+      }
+    },
+    "slash_commands": [
+      {
+        "name": "가입",
+        "description": "Link a Discord account to an internal user.",
+        "autocomplete": [
+          "반"
+        ]
+      },
+      {
+        "name": "반채널연동",
+        "description": "Map the current Discord channel to a school class.",
+        "autocomplete": [
+          "반"
+        ]
+      },
+      {
+        "name": "과제추가",
+        "description": "Create an assignment."
+      },
+      {
+        "name": "과제목록",
+        "description": "Show assignments ordered by remaining time."
+      },
+      {
+        "name": "급식",
+        "description": "Show today's breakfast, lunch, and dinner as pages."
+      },
+      {
+        "name": "시간표",
+        "description": "Show today's timetable for the class channel."
+      },
+      {
+        "name": "팀원모집",
+        "description": "Create a team project recruitment post.",
+        "autocomplete": [
+          "과제id"
+        ]
+      },
+      {
+        "name": "팀목록",
+        "description": "Show recruiting team projects."
+      },
+      {
+        "name": "팀참여",
+        "description": "Join a team project.",
+        "autocomplete": [
+          "프로젝트id"
+        ]
+      },
+      {
+        "name": "팀완료",
+        "description": "Complete a team project and open anonymous reviews.",
+        "autocomplete": [
+          "프로젝트id"
+        ]
+      },
+      {
+        "name": "팀평가",
+        "description": "Submit an anonymous peer review after project completion.",
+        "autocomplete": [
+          "프로젝트id"
+        ]
+      },
+      {
+        "name": "팀평가요약",
+        "description": "Show review summary without writer identity.",
+        "autocomplete": [
+          "프로젝트id"
+        ]
+      },
+      {
+        "name": "역할이동",
+        "description": "Move members from one role to another and remove the old role."
+      },
+      {
+        "name": "역할일괄추가",
+        "description": "Add one role to multiple users."
+      },
+      {
+        "name": "역할일괄제거",
+        "description": "Remove one role from multiple users."
+      },
+      {
+        "name": "일괄추방",
+        "description": "Kick multiple users at once."
+      },
+      {
+        "name": "채널기록삭제",
+        "description": "Delete recent messages or recreate a channel to clear all history. Log channel is protected."
+      },
+      {
+        "name": "방생성",
+        "description": "Auto-create class channels, teacher channels, log channel, and roles.",
+        "teacher_only": false,
+        "admin_only": true
+      },
+      {
+        "name": "공지",
+        "description": "Send announcement to all classes or a specific class.",
+        "teacher_only": true,
+        "autocomplete": ["반"]
+      },
+      {
+        "name": "동아리생성",
+        "description": "Create a club with channels, roles, and category.",
+        "teacher_only": true
+      },
+      {
+        "name": "동아리삭제",
+        "description": "Delete a club (teacher or club admin only).",
+        "teacher_only": false
+      },
+      {
+        "name": "동아리관리자양도",
+        "description": "Transfer club admin to another member.",
+        "teacher_only": false
+      },
+      {
+        "name": "동아리관리자추가",
+        "description": "Add a co-admin to a club.",
+        "teacher_only": false
+      },
+      {
+        "name": "동아리멤버추가",
+        "description": "Add a member to a club (club admin or teacher).",
+        "teacher_only": false
+      },
+      {
+        "name": "동아리목록",
+        "description": "List all clubs in the server."
+      },
+      {
+        "name": "음성방생성",
+        "description": "Create a temporary private voice room for invited members."
+      }
+    ]
+  },
+  "clubs": {
+    "enabled": true,
+    "categories": {
+      "class": "📚 학급",
+      "teacher": "👩‍🏫 교직원",
+      "admin": "🔒 관리",
+      "club": "🎯 동아리",
+      "voice": "🎙️ 음성방"
+    },
+    "roles": {
+      "teacher": "선생님",
+      "class_prefix": "",
+      "club_admin_suffix": "-관리자",
+      "club_member_suffix": "-멤버"
+    }
+  },
+  "team_projects": {
+    "enabled": true,
+    "anonymous_reviews": true,
+    "review_scale": {
+      "min": 1,
+      "max": 5
+    },
+    "api": {
+      "create_project": "POST /api/team-projects",
+      "list_projects": "GET /api/team-projects",
+      "join_project": "POST /api/team-projects/{project_id}/join",
+      "complete_project": "POST /api/team-projects/{project_id}/complete",
+      "submit_review": "POST /api/team-projects/{project_id}/reviews",
+      "review_summary": "GET /api/team-projects/{project_id}/reviews/summary"
+    }
+  },
+  "notification": {
+    "dispatch_path": "/api/notifications/dispatch-due",
+    "retry_path": "/api/notifications/{notification_id}/retry",
+    "default_rules": [
+      {
+        "offset_minutes": 10080,
+        "channel": "discord",
+        "enabled": true
+      },
+      {
+        "offset_minutes": 4320,
+        "channel": "discord",
+        "enabled": true
+      },
+      {
+        "offset_minutes": 1440,
+        "channel": "discord",
+        "enabled": true
+      },
+      {
+        "offset_minutes": 60,
+        "channel": "discord",
+        "enabled": true
+      }
+    ]
+  }
+}
