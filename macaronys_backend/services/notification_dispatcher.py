@@ -75,6 +75,11 @@ async def dispatch_discord_notification(
     session: AsyncSession,
     notification: Notification,
 ) -> bool:
+    # 개인 과제는 채널이 아니라 소유자 개인 DM으로 보낸다.
+    assignment = await session.get(Assignment, notification.assignment_id)
+    if assignment is not None and assignment.is_personal and assignment.owner_discord_user_id:
+        return await dispatch_personal_dm(session, notification, assignment)
+
     if not settings.discord_webhook_url:
         return await dispatch_discord_notification_with_bot_token(session, notification)
 
@@ -88,6 +93,55 @@ async def dispatch_discord_notification(
             session,
             notification,
             f"Discord webhook returned HTTP {response.status_code}",
+        )
+        return False
+
+    await mark_notification_sent(session, notification)
+    return True
+
+
+async def dispatch_personal_dm(
+    session: AsyncSession,
+    notification: Notification,
+    assignment: Assignment,
+) -> bool:
+    if not settings.discord_bot_token:
+        await mark_notification_failed(
+            session,
+            notification,
+            "DISCORD_BOT_TOKEN is required for personal DM notifications",
+        )
+        return False
+
+    headers = {
+        "Authorization": f"Bot {settings.discord_bot_token}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        dm = await client.post(
+            "https://discord.com/api/v10/users/@me/channels",
+            headers=headers,
+            json={"recipient_id": assignment.owner_discord_user_id},
+        )
+        if dm.status_code >= 400:
+            await mark_notification_failed(
+                session,
+                notification,
+                f"Failed to open DM channel: HTTP {dm.status_code}",
+            )
+            return False
+        dm_channel_id = dm.json().get("id")
+        response = await client.post(
+            f"https://discord.com/api/v10/channels/{dm_channel_id}/messages",
+            headers=headers,
+            json={"content": notification.message},
+        )
+
+    if response.status_code >= 400:
+        await mark_notification_failed(
+            session,
+            notification,
+            f"Personal DM returned HTTP {response.status_code}",
         )
         return False
 
