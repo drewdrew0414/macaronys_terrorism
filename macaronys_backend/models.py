@@ -410,6 +410,7 @@ class TeamProject(Base):
     team_role_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     team_category_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     recruitment_message_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    recruit_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notification_scope: Mapped[str | None] = mapped_column(String(40), nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
