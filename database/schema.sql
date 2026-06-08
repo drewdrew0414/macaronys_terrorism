@@ -278,6 +278,7 @@ CREATE TABLE IF NOT EXISTS team_projects (
     team_role_id VARCHAR(120),
     team_category_id VARCHAR(120),
     recruitment_message_id VARCHAR(120),
+    recruit_deadline TIMESTAMPTZ,
     notification_scope VARCHAR(40),
     is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
