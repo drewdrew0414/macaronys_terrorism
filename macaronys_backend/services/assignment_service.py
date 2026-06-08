@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from enum import Enum
 
 from fastapi import HTTPException
@@ -14,7 +15,10 @@ from macaronys_backend.schemas.assignment import (
     AssignmentUpdate,
 )
 from macaronys_backend.schemas.source import CandidateRead
-from macaronys_backend.utils.time import ensure_aware, remaining_text
+from macaronys_backend.utils.time import ensure_aware, remaining_text, utc_now
+
+# 마감이 이만큼 지난 과제는 조회에서 숨긴다(기본 1개월).
+ASSIGNMENT_RETENTION_DAYS = 30
 
 
 def assignment_to_read(assignment: Assignment) -> AssignmentRead:
@@ -67,8 +71,20 @@ async def create_assignment(
     return assignment
 
 
-async def list_assignments(session: AsyncSession) -> list[Assignment]:
-    rows = await session.execute(select(Assignment).order_by(Assignment.due_at.asc()))
+async def list_assignments(
+    session: AsyncSession,
+    include_expired: bool = False,
+) -> list[Assignment]:
+    """과제를 마감 임박순(due_at 오름차순)으로 조회한다.
+
+    기본적으로 마감이 한 달 넘게 지난 과제는 제외한다.
+    include_expired=True 면 지난 과제까지 모두 포함한다.
+    """
+    query = select(Assignment).order_by(Assignment.due_at.asc())
+    if not include_expired:
+        cutoff = utc_now() - timedelta(days=ASSIGNMENT_RETENTION_DAYS)
+        query = query.where(Assignment.due_at >= cutoff)
+    rows = await session.execute(query)
     return list(rows.scalars().all())
 
 
