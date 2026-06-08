@@ -1719,11 +1719,12 @@ async def register_scanned_candidates(
     requester_discord_id: str,
     guild_id: str | None,
     target: str | None = None,
+    personal: bool = False,
 ) -> tuple[list[Assignment], int]:
     """마감일이 있는 추출 후보를 과제로 확정하고 알림을 예약한다.
 
-    target(대상 반/학년)이 주어지면 후보마다 대상 반별로 과제를 만든다.
-    없으면 등록자(연동 사용자)의 반으로 후보당 1개씩 만든다.
+    personal=True 면 개인 과제(소유자 DM에 매시간 알림)로 등록한다.
+    아니면 반 과제: target(대상 반/학년)이 있으면 반별로, 없으면 등록자의 반으로 만든다.
     """
     async with SessionLocal() as session:
         candidates = await list_candidates(session, source_id)
@@ -1748,7 +1749,32 @@ async def register_scanned_candidates(
                 user = await session.get(User, link.user_id)
         creator_id = user.id if user else None
 
-        # 대상 반/학년 → class_id 목록 (없으면 등록자 반 1개)
+        created: list[Assignment] = []
+
+        if personal:
+            # 개인 과제: 반 없음, 소유자(요청자) DM으로 매시간 알림
+            for candidate in registerable:
+                assignment = Assignment(
+                    title=candidate.title,
+                    subject=candidate.subject,
+                    due_at=candidate.due_at,
+                    submit_method=candidate.submit_method,
+                    source_id=candidate.source_id,
+                    source_quote=candidate.source_quote,
+                    class_id=None,
+                    creator_id=creator_id,
+                    is_personal=True,
+                    owner_discord_user_id=requester_discord_id,
+                )
+                session.add(assignment)
+                await session.flush()
+                await rebuild_notifications_for_assignment(session, assignment)
+                created.append(assignment)
+                candidate.status = CandidateStatus.accepted.value
+                await session.commit()
+            return created, skipped
+
+        # 반 과제: 대상 반/학년 → class_id 목록 (없으면 등록자 반 1개)
         if target and target.strip():
             target_pairs = await resolve_target_class_ids(session, target.strip())
             if not target_pairs:
@@ -1760,7 +1786,6 @@ async def register_scanned_candidates(
         else:
             class_ids = [user.class_id if user else None]
 
-        created: list[Assignment] = []
         for candidate in registerable:
             for class_id in class_ids:
                 assignment = Assignment(
@@ -1783,7 +1808,11 @@ async def register_scanned_candidates(
 
 
 class ScanResultView(discord.ui.View):
-    """추출 결과를 과제로 등록하는 버튼. (요청자 본인 또는 선생님/관리자만)"""
+    """추출 결과를 과제로 등록하는 버튼.
+
+    개인 과제(소유자 DM 매시간 알림)와 반 과제(반 채널 알림)를 나눠서 등록한다.
+    개인 DM에서는 반 컨텍스트가 없으므로 개인 과제 버튼만 노출한다.
+    """
 
     def __init__(
         self,
@@ -1798,12 +1827,27 @@ class ScanResultView(discord.ui.View):
         self._guild_id = guild_id
         self._target = target
 
-    @discord.ui.button(label="✅ 과제로 등록", style=discord.ButtonStyle.success)
-    async def register(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ) -> None:
+        personal_btn = discord.ui.Button(
+            label="🧑 개인 과제로 등록", style=discord.ButtonStyle.primary
+        )
+        personal_btn.callback = self._register_personal
+        self.add_item(personal_btn)
+
+        # 반 과제는 서버 채널에서만 (DM은 반 컨텍스트 없음)
+        if guild_id:
+            class_btn = discord.ui.Button(
+                label="📚 반 과제로 등록", style=discord.ButtonStyle.success
+            )
+            class_btn.callback = self._register_class
+            self.add_item(class_btn)
+
+    async def _register_personal(self, interaction: discord.Interaction) -> None:
+        await self._do_register(interaction, personal=True)
+
+    async def _register_class(self, interaction: discord.Interaction) -> None:
+        await self._do_register(interaction, personal=False)
+
+    async def _do_register(self, interaction: discord.Interaction, *, personal: bool) -> None:
         await interaction.response.defer(ephemeral=True)
         if interaction.user.id != self._requester_id and not is_teacher_or_admin(interaction):
             await interaction.followup.send(
@@ -1812,7 +1856,11 @@ class ScanResultView(discord.ui.View):
             return
         try:
             created, skipped = await register_scanned_candidates(
-                self._source_id, str(interaction.user.id), self._guild_id, self._target
+                self._source_id,
+                str(interaction.user.id),
+                self._guild_id,
+                target=self._target,
+                personal=personal,
             )
         except Exception as exc:
             await interaction.followup.send(f"등록 실패: {exc}", ephemeral=True)
@@ -1832,24 +1880,31 @@ class ScanResultView(discord.ui.View):
         except Exception:
             pass
 
-        # 등록된 대상 반 채널에 새 과제 알림 즉시 전송
+        # 반 과제만 반 채널에 즉시 알림 (개인 과제는 DM으로 매시간)
         announced = 0
-        for assignment in created:
-            if await announce_assignment_created(interaction.guild, assignment):
-                announced += 1
+        if not personal:
+            for assignment in created:
+                if await announce_assignment_created(interaction.guild, assignment):
+                    announced += 1
 
+        kind = "개인 과제" if personal else "반 과제"
         lines = "\n".join(f"- `{a.id[:8]}` {a.title}" for a in created[:10])
         if len(created) > 10:
             lines += f"\n…외 {len(created) - 10}개"
-        target_note = f" (대상: {self._target})" if self._target else ""
+        if personal:
+            extra = " · 마감까지 매시간 DM으로 알림이 갑니다"
+        elif announced:
+            extra = f" · 반 채널 알림 {announced}건 전송"
+        else:
+            extra = ""
+        target_note = f" (대상: {self._target})" if (not personal and self._target) else ""
         note = (
             f"\n\n⚠️ 마감일이 없어 제외된 {skipped}건은 /과제추가로 직접 등록하세요."
             if skipped
             else ""
         )
-        sent_note = f" · 반 채널 알림 {announced}건 전송" if announced else ""
         await interaction.followup.send(
-            f"✅ {len(created)}개 과제를 등록하고 알림을 예약했어요{target_note}{sent_note}.\n{lines}{note}",
+            f"✅ {kind} {len(created)}개 등록 완료{target_note}{extra}.\n{lines}{note}",
             ephemeral=True,
         )
 
