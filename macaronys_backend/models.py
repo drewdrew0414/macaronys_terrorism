@@ -370,6 +370,22 @@ class CommandLog(Base):
     )
 
 
+class Notice(Base):
+    __tablename__ = "notices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    guild_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    scope: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    author_discord_user_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    author_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    sent_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class TeamProject(Base):
     __tablename__ = "team_projects"
 
