@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from macaronys_backend.dependencies import get_session
@@ -39,9 +39,13 @@ async def create_assignment_route(
 
 @router.get("", response_model=list[AssignmentRead])
 async def list_assignments_route(
+    include_expired: bool = Query(
+        default=False,
+        description="마감이 한 달 넘게 지난 과제까지 포함할지 여부",
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> list[AssignmentRead]:
-    assignments = await list_assignments(session)
+    assignments = await list_assignments(session, include_expired=include_expired)
     return [assignment_to_read(assignment) for assignment in assignments]
 
 
