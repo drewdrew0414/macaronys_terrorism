@@ -26,6 +26,9 @@ DEFAULT_NOTIFICATION_RULES: tuple[tuple[int, NotificationChannel], ...] = (
     (30, NotificationChannel.discord),               # 30분 전
 )
 
+# 개인 과제는 마감까지 매시간 알림을 보내되, 최대 이 시간만큼만 생성한다(폭주 방지).
+PERSONAL_HOURLY_CAP_HOURS = 72
+
 
 async def ensure_default_notification_rules(session: AsyncSession) -> None:
     """기본 알림 규칙 중 빠진 것을 추가한다(멱등). 기존 DB에도 신규 규칙이 반영된다."""
@@ -123,15 +126,36 @@ async def rebuild_notifications_for_assignment(
         await session.flush()
         return 0
 
+    now = utc_now()
+    due_at = ensure_aware(assignment.due_at)
+    message = build_assignment_notification_message(assignment)
+
+    # 개인 과제: 마감까지 매시간 DM 알림 (최대 PERSONAL_HOURLY_CAP_HOURS 시간 분량)
+    if assignment.is_personal:
+        created = 0
+        cursor = max(now, due_at - timedelta(hours=PERSONAL_HOURLY_CAP_HOURS))
+        while cursor < due_at:
+            if cursor > now:
+                session.add(
+                    Notification(
+                        assignment_id=assignment.id,
+                        channel=NotificationChannel.discord.value,
+                        scheduled_at=cursor,
+                        status=NotificationStatus.pending.value,
+                        message=message,
+                    )
+                )
+                created += 1
+            cursor += timedelta(hours=1)
+        await session.flush()
+        return created
+
     await ensure_default_notification_rules(session)
     rules = await session.execute(
         select(NotificationRule).where(NotificationRule.enabled.is_(True))
     )
 
-    now = utc_now()
     created = 0
-    due_at = ensure_aware(assignment.due_at)
-
     for rule in rules.scalars().all():
         scheduled_at = due_at - timedelta(minutes=rule.offset_minutes)
         if scheduled_at <= now:
@@ -143,7 +167,7 @@ async def rebuild_notifications_for_assignment(
                 channel=rule.channel,
                 scheduled_at=scheduled_at,
                 status=NotificationStatus.pending.value,
-                message=build_assignment_notification_message(assignment),
+                message=message,
             )
         )
         created += 1
@@ -166,8 +190,9 @@ async def rebuild_notifications_by_assignment_id(
 
 def build_assignment_notification_message(assignment: Assignment) -> str:
     _, remain = remaining_text(assignment.due_at)
+    header = "[개인 과제 알림]" if getattr(assignment, "is_personal", False) else "[과제 알림]"
     lines = [
-        f"[과제 알림] {assignment.title}",
+        f"{header} {assignment.title}",
         f"마감: {ensure_aware(assignment.due_at).isoformat()}",
         f"남은 시간: {remain}",
     ]
