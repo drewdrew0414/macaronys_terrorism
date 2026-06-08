@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from macaronys_backend.enums import ClubMemberRole, CommandLogStatus
 from macaronys_backend.models import (
-    Club, ClubMember, CommandLog,
+    Club, ClubMember, CommandLog, Notice,
     Registration, TeamJoinRequest, TeamProject,
     Vote, VoteChoice, VoteResponse, VoiceRoom,
 )
@@ -87,6 +87,48 @@ async def save_command_log(
     await session.commit()
     await session.refresh(log)
     return log
+
+
+# ─── Notice ─────────────────────────────────────────────────────────────────────
+
+async def save_notice(
+    session: AsyncSession,
+    guild_id: str,
+    scope: str,
+    title: str | None,
+    content: str,
+    author_discord_user_id: str,
+    author_name: str | None,
+    sent_count: int,
+) -> Notice:
+    notice = Notice(
+        guild_id=guild_id,
+        scope=scope,
+        title=title,
+        content=content,
+        author_discord_user_id=author_discord_user_id,
+        author_name=author_name,
+        sent_count=sent_count,
+    )
+    session.add(notice)
+    await session.commit()
+    await session.refresh(notice)
+    return notice
+
+
+async def list_recent_notices(
+    session: AsyncSession,
+    guild_id: str,
+    limit: int = 10,
+) -> list[Notice]:
+    """공지를 최신순(created_at 내림차순)으로 조회한다."""
+    rows = await session.execute(
+        select(Notice)
+        .where(Notice.guild_id == guild_id)
+        .order_by(Notice.created_at.desc())
+        .limit(limit)
+    )
+    return list(rows.scalars().all())
 
 
 # ─── Club ─────────────────────────────────────────────────────────────────────
