@@ -37,6 +37,10 @@ def build_async_engine_options(database_url: str) -> dict[str, object]:
                 if ssl_context is not None:
                     connect_args["ssl"] = ssl_context
                 continue
+            # libpq 전용 파라미터로, asyncpg 드라이버는 인식하지 못해 그대로 두면
+            # connect()가 TypeError를 낸다(Neon 풀러 URL의 channel_binding 등).
+            if key in {"channel_binding", "gssencmode", "target_session_attrs"}:
+                continue
             filtered_query.append((key, value))
         normalized_url = urlunsplit(
             (
